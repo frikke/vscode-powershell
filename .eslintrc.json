@@ -5,9 +5,8 @@
   },
   "extends": [
     "eslint:recommended",
-    "plugin:@typescript-eslint/recommended",
-    "plugin:@typescript-eslint/recommended-requiring-type-checking",
-    "plugin:@typescript-eslint/strict"
+    "plugin:@typescript-eslint/stylistic-type-checked",
+    "plugin:@typescript-eslint/strict-type-checked"
   ],
   "overrides": [],
   "parser": "@typescript-eslint/parser",
@@ -15,9 +14,7 @@
     "ecmaVersion": "latest",
     "sourceType": "module",
     "tsconfigRootDir": ".",
-    "project": [
-      "./tsconfig.json"
-    ]
+    "project": true
   },
   "plugins": [
     "@typescript-eslint",
@@ -36,41 +33,34 @@
       "error",
       "always"
     ],
-    "@typescript-eslint/explicit-function-return-type": [
-      "error"
-    ],
+    "@typescript-eslint/explicit-function-return-type": "error",
+    "@typescript-eslint/no-empty-object-type": "off",
     "@typescript-eslint/no-floating-promises": [
       "error",
       {
         "ignoreVoid": true
       }
     ],
-    "@typescript-eslint/no-non-null-assertion": [
-      "off"
-    ],
+    "@typescript-eslint/no-non-null-assertion": "off",
+    "@typescript-eslint/no-require-imports": "off",
     "@typescript-eslint/no-unused-vars": [
       "error",
       {
         "argsIgnorePattern": "^_"
       }
     ],
-    "@typescript-eslint/no-unsafe-argument": [
-      "off"
-    ],
-    "@typescript-eslint/no-unsafe-assignment": [
-      "off"
-    ],
-    "@typescript-eslint/no-unsafe-call": [
-      "off"
-    ],
-    "@typescript-eslint/no-unsafe-member-access": [
-      "off"
-    ],
-    "@typescript-eslint/no-unsafe-return": [
-      "off"
-    ],
-    "@typescript-eslint/restrict-template-expressions": [
-      "off"
+    "@typescript-eslint/no-unsafe-argument": "off",
+    "@typescript-eslint/no-unsafe-assignment": "off",
+    "@typescript-eslint/no-unsafe-call": "off",
+    "@typescript-eslint/no-unsafe-member-access": "off",
+    "@typescript-eslint/no-unsafe-return": "off",
+    "@typescript-eslint/restrict-template-expressions": "off",
+    "@typescript-eslint/prefer-nullish-coalescing": [
+      "error",
+      {
+        "ignoreConditionalTests": true,
+        "ignoreMixedLogicalExpressions": true
+      }
     ],
     "header/header": [
       2,

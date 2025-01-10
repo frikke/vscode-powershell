@@ -111,23 +111,24 @@ describe("UpdatePowerShell feature", function () {
             };
             const updater = new UpdatePowerShell(settings, testLogger, version);
             // @ts-expect-error method is private.
-            const tag: string | undefined = await updater.maybeGetNewRelease();
-            // NOTE: This will need to be updated each new major LTS.
-            assert(tag?.startsWith("v7.2"));
+            const tag: string = await updater.maybeGetNewRelease() ?? "";
+            // NOTE: This will need to be updated each time an LTS is released.
+            // Also sometimes the prior LTS is more recently updated than the latest LTS.
+            assert(tag.startsWith("v7.4") || tag.startsWith("v7.2"));
         });
 
         it("Would update to stable", async function() {
             const version: IPowerShellVersionDetails = {
-                "version": "7.0.0",
+                "version": "7.3.0",
                 "edition": "Core",
-                "commit": "7.0.0",
+                "commit": "7.3.0",
                 "architecture": "X64"
             };
             const updater = new UpdatePowerShell(settings, testLogger, version);
             // @ts-expect-error method is private.
             const tag: string | undefined = await updater.maybeGetNewRelease();
             // NOTE: This will need to be updated each new major stable.
-            assert(tag?.startsWith("v7.3"));
+            assert(tag?.startsWith("v7.4"));
         });
     });
 });
