@@ -161,6 +161,25 @@
       "}"
     ]
   },
+  "Foreach with Progress": {
+    "prefix": "foreach-progress",
+    "description": "Insert a foreach loop with Write-Progress initialized",
+    "body": [
+      "\\$total = \\$${1:array}.count",
+      "\\$${4:i} = 1",
+      "\\$progPercent = \"{0:n2}\" -f ([math]::round(\\$${4:i}/\\$total,4) * 100)",
+      "Write-Progress -Activity \"${3:activityName}\" -Status \"\\$${4:i} of \\$total - \\$progPercent% Complete:\" -PercentComplete \\$progPercent",
+      "foreach ($${2:item} in $${1:array}) {",
+      "    \\$progPercent = \"{0:n2}\" -f ([math]::round(\\$${4:i}/\\$total,4) * 100)",
+      "    Write-Progress -Activity \"${3:activityName}\" -Status \"\\$${4:i} of \\$total - \\$progPercent% Complete:\" -PercentComplete \\$progPercent",
+      "    # Insert Code Here",
+      "    ${0}",
+      "    ",
+      "    \\$${4:i}++",
+      "}",
+      ""
+    ]
+  },
   "ForEach-Object -Parallel": {
     "prefix": "foreach-parallel",
     "description": "[PS 7+] Process multiple objects in parallel using runspaces. This has some limitations compared to a regular ForEach-Object. More: Get-Help ForEach-Object",
@@ -250,8 +269,9 @@
     "description": "Suppress a PSScriptAnalyzer rule for a function. More: https://docs.microsoft.com/en-us/powershell/utility-modules/psscriptanalyzer/overview?view=ps-modules#suppressing-rules",
     "body": [
       "[Diagnostics.CodeAnalysis.SuppressMessageAttribute(",
-      "\t<#Category#>'${1:PSProvideDefaultParameterValue}', <#CheckId>\\$null, Scope='Function',",
-      "\tJustification = '${0:${TM_SELECTED_TEXT:Reason for suppressing}}'",
+      "\t<#Category#>'${1:PSProvideDefaultParameterValue}', <#CheckId#>\\$null,",
+      "\tScope='Function',",
+      "\tJustification='${0:${TM_SELECTED_TEXT:Reason for suppressing}}'",
       ")]"
     ]
   },
@@ -504,9 +524,10 @@
     ],
     "description": "Suppress a PSScriptAnalyzer rule on a parameter. More: https://docs.microsoft.com/en-us/powershell/utility-modules/psscriptanalyzer/overview?view=ps-modules#suppressing-rules",
     "body": [
-      "[Diagnostics.CodeAnalysis.SuppressMessageAttribute(<#Category#>'${1:PSUseDeclaredVarsMoreThanAssignments}',",
-      "\t<#ParameterName#>'${0:${TM_SELECTED_TEXT:ParamName}}",
-      "\tJustification = '${0:${TM_SELECTED_TEXT:Reason for suppressing}}'",
+      "[Diagnostics.CodeAnalysis.SuppressMessageAttribute(",
+      "\t<#Category#>'${1:PSUseDeclaredVarsMoreThanAssignments}',",
+      "\t<#ParameterName#>'${2:${TM_SELECTED_TEXT:ParamName}}',",
+      "\tJustification='${0:Reason for suppressing}'",
       ")]"
     ]
   },
@@ -548,13 +569,17 @@
     ]
   },
   "Scope: Suppress PSScriptAnalyzer Rule": {
-    "prefix": "suppress-message-rule-scope",
+    "prefix": [
+      "suppress-message-rule-scope",
+      "[SuppressMessageAttribute]"
+    ],
     "description": "Suppress a PSScriptAnalyzer rule based on a function/parameter/class/variable/object's name by setting the SuppressMessageAttribute's Target property to a regular expression or a glob pattern. More: https://docs.microsoft.com/en-us/powershell/utility-modules/psscriptanalyzer/overview?view=ps-modules#suppressing-rules",
     "body": [
       "[Diagnostics.CodeAnalysis.SuppressMessageAttribute(",
-      "\t<#Category#>'${1:PSUseDeclaredVarsMoreThanAssignments}', <#CheckId#>\\$null, Scope='Function',",
-      "\tTarget='${1:${TM_SELECTED_TEXT:RegexOrGlobPatternToMatchName}}'",
-      "\tJustification = '${0:Reason for suppressing}}'",
+      "\t<#Category#>'${1:PSUseDeclaredVarsMoreThanAssignments}', <#CheckId#>\\$null,",
+      "\tScope='${2|Function,Parameter,Class,Variable,Object|}',",
+      "\tTarget='${3:${TM_SELECTED_TEXT:RegexOrGlobPatternToMatchName}}',",
+      "\tJustification='${0:Reason for suppressing}'",
       ")]"
     ]
   },

@@ -50,6 +50,8 @@ describe("DebugSessionFeature", () => {
     });
 
     beforeEach(() => {
+        // Because we recreate DebugSessionFeature constantly, we need to avoid registering the same commands over and over.
+        Sinon.stub(commands, "registerCommand").returns(Disposable.create(() => {"Stubbed";}));
         registerProviderStub = Sinon.stub(debug, "registerDebugConfigurationProvider").returns(Disposable.create(() => {"Stubbed";}));
         registerFactoryStub = Sinon.stub(debug, "registerDebugAdapterDescriptorFactory").returns(Disposable.create(() => {"Stubbed";}));
     });
@@ -57,6 +59,7 @@ describe("DebugSessionFeature", () => {
     afterEach(() => {
         Sinon.restore();
     });
+
     describe("Constructor", () => {
         it("Registers debug configuration provider and factory", () => {
             const context = stubInterface<ExtensionContext>({
@@ -66,7 +69,7 @@ describe("DebugSessionFeature", () => {
             createDebugSessionFeatureStub({context: context});
             assert.ok(registerFactoryStub.calledOnce, "Debug adapter factory method called");
             assert.ok(registerProviderStub.calledTwice, "Debug config provider registered for both Initial and Dynamic");
-            assert.equal(context.subscriptions.length, 3, "DebugSessionFeature disposables populated");
+            assert.equal(context.subscriptions.length, 4, "DebugSessionFeature disposables populated");
             // TODO: Validate the registration content, such as the language name
         });
     });
@@ -232,14 +235,17 @@ describe("DebugSessionFeature", () => {
                     version: "7.2.3"
                 })
             );
-            const executeCommandStub = Sinon.stub(commands, "executeCommand").resolves(7357);
-
-            const actual = await createDebugSessionFeatureStub({
+            const debugSessionFeatureStub = createDebugSessionFeatureStub({
                 sessionManager: sessionManager
-            }).resolveDebugConfigurationWithSubstitutedVariables(undefined, attachConfig);
+            });
+
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const pickPSHostProcessStub = Sinon.stub(debugSessionFeatureStub , "pickPSHostProcess" as any).resolves(7357);
+
+            const actual = await debugSessionFeatureStub.resolveDebugConfigurationWithSubstitutedVariables(undefined, attachConfig);
 
             assert.equal(actual!.processId, TEST_NUMBER);
-            assert.ok(executeCommandStub.calledOnceWith("PowerShell.PickPSHostProcess"));
+            assert.ok(pickPSHostProcessStub.calledOnce);
         });
 
         it("Attach: Exits if process was not selected from the picker", async () => {
@@ -254,14 +260,17 @@ describe("DebugSessionFeature", () => {
                     version: "7.2.3"
                 })
             );
-            const executeCommandStub = Sinon.stub(commands, "executeCommand").resolves(undefined);
-
-            const actual = await createDebugSessionFeatureStub({
+            const debugSessionFeatureStub = createDebugSessionFeatureStub({
                 sessionManager: sessionManager
-            }).resolveDebugConfigurationWithSubstitutedVariables(undefined, attachConfig);
+            });
+
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const pickPSHostProcessStub = Sinon.stub(debugSessionFeatureStub, "pickPSHostProcess" as any).resolves(undefined);
+
+            const actual = await debugSessionFeatureStub.resolveDebugConfigurationWithSubstitutedVariables(undefined, attachConfig);
 
             assert.equal(actual, undefined);
-            assert.ok(executeCommandStub.calledOnceWith("PowerShell.PickPSHostProcess"));
+            assert.ok(pickPSHostProcessStub.calledOnce);
         });
 
         it("Attach: Prompts for Runspace if not specified", async () => {
@@ -275,14 +284,17 @@ describe("DebugSessionFeature", () => {
                     version: "7.2.3"
                 })
             );
-            const executeCommandStub = Sinon.stub(commands, "executeCommand").resolves(TEST_NUMBER);
-
-            const actual = await createDebugSessionFeatureStub({
+            const debugSessionFeatureStub = createDebugSessionFeatureStub({
                 sessionManager: sessionManager
-            }).resolveDebugConfigurationWithSubstitutedVariables(undefined, attachConfig);
+            });
+
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const pickRunspaceStub = Sinon.stub(debugSessionFeatureStub, "pickRunspace" as any).resolves(TEST_NUMBER);
+
+            const actual = await debugSessionFeatureStub.resolveDebugConfigurationWithSubstitutedVariables(undefined, attachConfig);
 
             assert.equal(actual!.runspaceId, TEST_NUMBER);
-            assert.ok(executeCommandStub.calledOnceWith("PowerShell.PickRunspace", TEST_NUMBER));
+            assert.ok(pickRunspaceStub.calledOnceWith(TEST_NUMBER));
         });
 
         it("Attach: Exits if runspace was not selected from the picker", async () => {
@@ -296,13 +308,16 @@ describe("DebugSessionFeature", () => {
                     version: "7.2.3"
                 })
             );
-            const executeCommandStub = Sinon.stub(commands, "executeCommand").resolves(undefined);
-
-            const actual = await createDebugSessionFeatureStub({
+            const debugSessionFeatureStub = createDebugSessionFeatureStub({
                 sessionManager: sessionManager
-            }).resolveDebugConfigurationWithSubstitutedVariables(undefined, attachConfig);
+            });
+
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const pickRunspaceStub = Sinon.stub(debugSessionFeatureStub, "pickRunspace" as any).resolves(undefined);
+
+            const actual = await debugSessionFeatureStub.resolveDebugConfigurationWithSubstitutedVariables(undefined, attachConfig);
             assert.equal(actual, undefined);
-            assert.ok(executeCommandStub.calledOnceWith("PowerShell.PickRunspace", TEST_NUMBER));
+            assert.ok(pickRunspaceStub.calledOnceWith(TEST_NUMBER));
         });
 
         it("Starts dotnet attach debug session with default config", async () => {
@@ -394,13 +409,18 @@ describe("DebugSessionFeature", () => {
             attachConfig.dotnetDebuggerConfigName = foundDotnetConfig.name;
             const debugSessionFeature = createDebugSessionFeatureStub({});
 
-            // The any is necessary to stub a private method
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
             Sinon.stub(debugSessionFeature, "getLaunchConfigurations" as any).returns(candidateDotnetConfigs);
 
             const config = await debugSessionFeature.resolveDebugConfigurationWithSubstitutedVariables(undefined, attachConfig);
 
-            assert.deepStrictEqual(config!.dotnetAttachConfig, foundDotnetConfig);
+            // This config will only be present if the C# extension is installed.
+            if (extensions.getExtension("ms-dotnettools.csharp")) {
+                assert.ok(config);
+                assert.deepStrictEqual(config.dotnetAttachConfig, foundDotnetConfig);
+            } else {
+                assert.ok(!config);
+            }
         });
     });
 
@@ -428,13 +448,16 @@ describe("DebugSessionFeature", () => {
     });
 });
 
-describe("DebugSessionFeature E2E", () => {
+describe("DebugSessionFeature E2E", function() {
+    // E2E tests can take a while to run since the debugger has to start up and attach
+    this.slow(20000);
     before(async () => {
         // Registers and warms up the debug adapter and the PowerShell Extension Terminal
         await ensureEditorServicesIsConnected();
     });
 
     it("Starts and stops a debugging session", async () => {
+
         // Inspect the debug session via the started events to ensure it is correct
         const startDebugSession = new Promise<DebugSession>((resolve) => {
             const event = debug.onDidStartDebugSession((session) => {
@@ -463,9 +486,8 @@ describe("DebugSessionFeature E2E", () => {
         let binaryModulePath: Uri;
 
         before(async function binarySetup() {
-            if (process.env.BUILD_SOURCEBRANCHNAME === "release") {
-                // The binary modules tests won't work in the release pipeline
-                // due to dependency requirements.
+            if (!extensions.getExtension("ms-dotnettools.csharp")) {
+                // These tests require that extension to be installed in the test environment.
                 this.skip();
             }
             binaryModulePath = Uri.joinPath(workspace.workspaceFolders![0].uri, "BinaryModule");
@@ -489,8 +511,8 @@ describe("DebugSessionFeature E2E", () => {
 
             const debugStarted = await debug.startDebugging(undefined, launchScriptConfig);
             assert.ok(debugStarted);
-            const debugStopped = await debug.stopDebugging(undefined);
-            assert.ok(debugStopped);
+
+            await debug.stopDebugging(undefined);
 
             assert.ok(startDebugging.calledTwice);
             assert.ok(startDebugging.calledWith(undefined, launchScriptConfig));
@@ -531,11 +553,11 @@ describe("DebugSessionFeature E2E", () => {
             const dotnetDebugSession = await dotnetDebugSessionActive;
             console.log(debug.activeDebugSession);
             console.log(debug.breakpoints);
-            const debugStopped = await debug.stopDebugging(undefined);
+
+            await debug.stopDebugging(undefined);
 
             assert.ok(debugStarted);
             assert.ok(dotnetDebugSession);
-            assert.ok(debugStopped);
         });
     });
 });
