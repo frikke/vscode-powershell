@@ -22,8 +22,12 @@ import {
     InputBoxOptions,
     QuickPickItem,
     QuickPickOptions,
-    DebugConfigurationProviderTriggerKind
+    DebugConfigurationProviderTriggerKind,
+    DebugAdapterTrackerFactory,
+    DebugAdapterTracker,
+    LogOutputChannel
 } from "vscode";
+import type { DebugProtocol } from "@vscode/debugprotocol";
 import { NotificationType, RequestType } from "vscode-languageclient";
 import { LanguageClient } from "vscode-languageclient/node";
 import { LanguageClientConsumer } from "../languageClientConsumer";
@@ -86,7 +90,6 @@ export const DebugConfigurations: Record<DebugConfig, DebugConfiguration> = {
         name: "PowerShell: Attach to PowerShell Host Process",
         type: "PowerShell",
         request: "attach",
-        runspaceId: 1,
     },
     [DebugConfig.RunPester]: {
         name: "PowerShell: Run Pester Tests",
@@ -94,7 +97,7 @@ export const DebugConfigurations: Record<DebugConfig, DebugConfiguration> = {
         request: "launch",
         script: "Invoke-Pester",
         createTemporaryIntegratedConsole: true,
-        attachDotnetDebugger: true
+        attachDotnetDebugger: true,
     },
     [DebugConfig.ModuleInteractiveSession]: {
         name: "PowerShell: Module Interactive Session",
@@ -108,7 +111,7 @@ export const DebugConfigurations: Record<DebugConfig, DebugConfiguration> = {
         request: "launch",
         script: "Enter command to import your binary module, for example: \"Import-Module -Force ${workspaceFolder}/path/to/module.psd1|dll\"",
         createTemporaryIntegratedConsole: true,
-        attachDotnetDebugger: true
+        attachDotnetDebugger: true,
     },
     [DebugConfig.BinaryModulePester]: {
         name: "PowerShell: Binary Module Pester Tests",
@@ -116,37 +119,70 @@ export const DebugConfigurations: Record<DebugConfig, DebugConfiguration> = {
         request: "launch",
         script: "Invoke-Pester",
         createTemporaryIntegratedConsole: true,
-        attachDotnetDebugger: true
+        attachDotnetDebugger: true,
     }
 };
 
 export class DebugSessionFeature extends LanguageClientConsumer
     implements DebugConfigurationProvider, DebugAdapterDescriptorFactory {
-
-    private sessionCount = 1;
     private tempDebugProcess: PowerShellProcess | undefined;
     private tempSessionDetails: IEditorServicesSessionDetails | undefined;
+    private commands: Disposable[] = [];
     private handlers: Disposable[] = [];
+    private adapterName = "PowerShell";
 
     constructor(context: ExtensionContext, private sessionManager: SessionManager, private logger: ILogger) {
         super();
-        // This "activates" the debug adapter for use with  You can only do this once.
-        [
-            DebugConfigurationProviderTriggerKind.Initial,
-            DebugConfigurationProviderTriggerKind.Dynamic
-        ].forEach(triggerKind => {
-            context.subscriptions.push(debug.registerDebugConfigurationProvider("PowerShell", this, triggerKind));
-        });
-        context.subscriptions.push(debug.registerDebugAdapterDescriptorFactory("PowerShell", this));
+
+        this.activateDebugAdaptor(context);
+
+        // NOTE: While process and runspace IDs are numbers, command
+        // substitutions in VS Code debug configurations are required to return
+        // strings. Hence to the `toString()` on these.
+        this.commands = [
+            commands.registerCommand("PowerShell.PickPSHostProcess", async () => {
+                const processId = await this.pickPSHostProcess();
+                return processId?.toString();
+            }),
+
+            commands.registerCommand("PowerShell.PickRunspace", async (processId) => {
+                const runspace = await this.pickRunspace(processId);
+                return runspace?.toString();
+            }, this),
+        ];
     }
 
     public dispose(): void {
+        for (const command of this.commands) {
+            command.dispose();
+        }
+
         for (const handler of this.handlers) {
             handler.dispose();
         }
     }
 
-    public override setLanguageClient(languageClient: LanguageClient): void {
+    // This "activates" the debug adapter. You can only do this once.
+    public activateDebugAdaptor(context: ExtensionContext): void {
+        const triggers = [
+            DebugConfigurationProviderTriggerKind.Initial,
+            DebugConfigurationProviderTriggerKind.Dynamic
+        ];
+
+
+        for (const triggerKind of triggers) {
+            context.subscriptions.push(
+                debug.registerDebugConfigurationProvider(this.adapterName, this, triggerKind)
+            );
+        }
+
+        context.subscriptions.push(
+            debug.registerDebugAdapterTrackerFactory(this.adapterName, new PowerShellDebugAdapterTrackerFactory(this.adapterName)),
+            debug.registerDebugAdapterDescriptorFactory(this.adapterName, this)
+        );
+    }
+
+    public override onLanguageClientSet(languageClient: LanguageClient): void {
         this.handlers = [
             languageClient.onNotification(
                 StartDebuggerNotificationType,
@@ -263,6 +299,7 @@ export class DebugSessionFeature extends LanguageClientConsumer
 
         const settings = getSettings();
         config.createTemporaryIntegratedConsole ??= settings.debugging.createTemporaryIntegratedConsole;
+        config.executeMode ??= settings.debugging.executeMode;
         if (config.request === "attach") {
             resolvedConfig = await this.resolveAttachDebugConfiguration(config);
         } else if (config.request === "launch") {
@@ -275,11 +312,15 @@ export class DebugSessionFeature extends LanguageClientConsumer
         return resolvedConfig;
     }
 
-    // This is our factory entrypoint hook to when a debug session starts, and where we will lazy initialize everything needed to do the debugging such as a temporary console if required
+    // This is our factory entrypoint hook to when a debug session starts, and
+    // where we will lazy initialize everything needed to do the debugging such
+    // as a temporary console if required.
+    //
+    // NOTE: A Promise meets the shape of a ProviderResult, which allows us to
+    // make this method async.
     public async createDebugAdapterDescriptor(
         session: DebugSession,
         _executable: DebugAdapterExecutable | undefined): Promise<DebugAdapterDescriptor | undefined> {
-        // NOTE: A Promise meets the shape of a ProviderResult, which allows us to make this method async.
 
         await this.sessionManager.start();
 
@@ -294,8 +335,8 @@ export class DebugSessionFeature extends LanguageClientConsumer
         // Create or show the debug terminal (either temporary or session).
         this.sessionManager.showDebugTerminal(true);
 
-        this.logger.writeVerbose(`Connecting to pipe: ${sessionDetails.debugServicePipeName}`);
-        this.logger.writeVerbose(`Debug configuration: ${JSON.stringify(session.configuration, undefined, 2)}`);
+        this.logger.writeDebug(`Connecting to pipe: ${sessionDetails.debugServicePipeName}`);
+        this.logger.writeDebug(`Debug configuration: ${JSON.stringify(session.configuration, undefined, 2)}`);
 
         return new DebugAdapterNamedPipeServer(sessionDetails.debugServicePipeName);
     }
@@ -359,8 +400,7 @@ export class DebugSessionFeature extends LanguageClientConsumer
         this.tempDebugProcess = await this.sessionManager.createDebugSessionProcess(settings);
         // TODO: Maybe set a timeout on the cancellation token?
         const cancellationTokenSource = new CancellationTokenSource();
-        this.tempSessionDetails = await this.tempDebugProcess.start(
-            `DebugSession-${this.sessionCount++}`, cancellationTokenSource.token);
+        this.tempSessionDetails = await this.tempDebugProcess.start(cancellationTokenSource.token);
 
         // NOTE: Dotnet attach debugging is only currently supported if a temporary debug terminal is used, otherwise we get lots of lock conflicts from loading the assemblies.
         if (session.configuration.attachDotnetDebugger) {
@@ -375,33 +415,57 @@ export class DebugSessionFeature extends LanguageClientConsumer
             dotnetAttachConfig.processId = pid;
 
             // Ensure the .NET session stops before the PowerShell session so that the .NET debug session doesn't emit an error about the process unexpectedly terminating.
-            const startDebugEvent = debug.onDidStartDebugSession((dotnetAttachSession) => {
+            let tempConsoleDotnetAttachSession: DebugSession;
+            const startDebugEvent = debug.onDidStartDebugSession(dotnetAttachSession => {
+                if (dotnetAttachSession.configuration.name != dotnetAttachConfig.name) { return; }
+
                 // Makes the event one-time
                 // HACK: This seems like you would be calling a method on a variable not assigned yet, but it does work in the flow.
                 // The dispose shorthand demonry for making an event one-time courtesy of: https://github.com/OmniSharp/omnisharp-vscode/blob/b8b07bb12557b4400198895f82a94895cb90c461/test/integrationTests/launchConfiguration.integration.test.ts#L41-L45
                 startDebugEvent.dispose();
-                this.logger.writeVerbose(`Debugger session detected: ${dotnetAttachSession.name} (${dotnetAttachSession.id})`);
-                if (dotnetAttachSession.configuration.name == dotnetAttachConfig.name) {
-                    const stopDebugEvent = debug.onDidTerminateDebugSession(async (terminatedDebugSession) => {
-                        // Makes the event one-time
-                        stopDebugEvent.dispose();
 
-                        this.logger.writeVerbose(`Debugger session stopped: ${terminatedDebugSession.name} (${terminatedDebugSession.id})`);
+                this.logger.writeDebug(`Debugger session detected: ${dotnetAttachSession.name} (${dotnetAttachSession.id})`);
 
-                        if (terminatedDebugSession === session) {
-                            this.logger.writeVerbose("Terminating dotnet debugger session associated with PowerShell debug session!");
-                            await debug.stopDebugging(dotnetAttachSession);
+                tempConsoleDotnetAttachSession = dotnetAttachSession;
+
+                const stopDebugEvent = debug.onDidTerminateDebugSession(async tempConsoleSession => {
+                    if (tempConsoleDotnetAttachSession.parentSession?.id !== tempConsoleSession.id) { return; }
+
+                    // Makes the event one-time
+                    stopDebugEvent.dispose();
+
+                    this.logger.writeDebug(`Debugger session terminated: ${tempConsoleSession.name} (${tempConsoleSession.id})`);
+
+                    // HACK: As of 2023-08-17, there is no vscode debug API to request the C# debugger to detach, so we send it a custom DAP request instead.
+                    const disconnectRequest: DebugProtocol.DisconnectRequest = {
+                        command: "disconnect",
+                        seq: 0,
+                        type: "request",
+                        arguments: {
+                            restart: false,
+                            terminateDebuggee: false,
+                            suspendDebuggee: false
                         }
-                    });
-                }
+                    };
+
+                    try {
+                        await dotnetAttachSession.customRequest(
+                            disconnectRequest.command,
+                            disconnectRequest.arguments
+                        );
+                    } catch (err) {
+                        this.logger.writeWarning(`Disconnect request to dotnet debugger failed: ${err}`);
+                    }
+                });
             });
 
             // Start a child debug session to attach the dotnet debugger
             // TODO: Accommodate multi-folder workspaces if the C# code is in a different workspace folder
             await debug.startDebugging(undefined, dotnetAttachConfig, session);
-            this.logger.writeVerbose(`Dotnet attach debug configuration: ${JSON.stringify(dotnetAttachConfig, undefined, 2)}`);
-            this.logger.writeVerbose(`Attached dotnet debugger to process: ${pid}`);
+            this.logger.writeDebug(`Dotnet attach debug configuration: ${JSON.stringify(dotnetAttachConfig, undefined, 2)}`);
+            this.logger.writeDebug(`Attached dotnet debugger to process: ${pid}`);
         }
+
         return this.tempSessionDetails;
     }
 
@@ -428,7 +492,7 @@ export class DebugSessionFeature extends LanguageClientConsumer
         };
     }
 
-    /** Fetches all available vscode launch configurations. This is abstracted out for easier testing */
+    /** Fetches all available vscode launch configurations. This is abstracted out for easier testing. */
     private getLaunchConfigurations(): DebugConfiguration[] {
         return workspace.getConfiguration("launch").get<DebugConfiguration[]>("configurations") ?? [];
     }
@@ -449,15 +513,32 @@ export class DebugSessionFeature extends LanguageClientConsumer
 
         // If nothing is set, prompt for the processId.
         if (!config.customPipeName && !config.processId) {
-            config.processId = await commands.executeCommand("PowerShell.PickPSHostProcess");
+            config.processId = await this.pickPSHostProcess();
             // No process selected. Cancel attach.
             if (!config.processId) {
                 return PREVENT_DEBUG_START;
             }
         }
 
+        // If we were given a stringified int from the user, or from the picker
+        // command, we need to parse it here.
+        if (typeof config.processId === "string" && config.processId != "current") {
+            config.processId = parseInt(config.processId);
+        }
+
+        // NOTE: We don't support attaching to the Extension Terminal, even
+        // though in the past it looked like we did. The implementation was
+        // half-baked and left things unusable.
+        if (config.processId === "current" || config.processId === await this.sessionManager.getLanguageServerPid()) {
+            // TODO: When (if ever) it's supported, we need to convert 0 and the
+            // old notion of "current" to the actual process ID, like this:
+            // config.processId = await this.sessionManager.getLanguageServerPid();
+            void this.logger.writeAndShowError("Attaching to the PowerShell Extension terminal is not supported. Please use the 'PowerShell: Interactive Session' debug configuration instead.");
+            return PREVENT_DEBUG_START_AND_OPEN_DEBUGCONFIG;
+        }
+
         if (!config.runspaceId && !config.runspaceName) {
-            config.runspaceId = await commands.executeCommand("PowerShell.PickRunspace", config.processId);
+            config.runspaceId = await this.pickRunspace(config.processId);
             // No runspace selected. Cancel attach.
             if (!config.runspaceId) {
                 return PREVENT_DEBUG_START;
@@ -466,10 +547,119 @@ export class DebugSessionFeature extends LanguageClientConsumer
 
         return config;
     }
+
+    private async pickPSHostProcess(): Promise<number | undefined> {
+        const client = await LanguageClientConsumer.getLanguageClient();
+        const response = await client.sendRequest(GetPSHostProcessesRequestType, {});
+        const items: IProcessItem[] = [];
+        for (const process of response) {
+            let windowTitle = "";
+            if (process.mainWindowTitle) {
+                windowTitle = `, ${process.mainWindowTitle}`;
+            }
+
+            items.push({
+                label: process.processName,
+                description: `PID: ${process.processId.toString()}${windowTitle}`,
+                processId: process.processId,
+            });
+        }
+
+        if (items.length === 0) {
+            return Promise.reject(new Error("There are no PowerShell host processes to attach."));
+        }
+
+        const options: QuickPickOptions = {
+            placeHolder: "Select a PowerShell host process to attach.",
+            matchOnDescription: true,
+            matchOnDetail: true,
+        };
+
+        const item = await window.showQuickPick(items, options);
+
+        return item?.processId ?? undefined;
+    }
+
+    private async pickRunspace(processId: number): Promise<number | undefined> {
+        const client = await LanguageClientConsumer.getLanguageClient();
+        const response = await client.sendRequest(GetRunspaceRequestType, { processId });
+        const items: IRunspaceItem[] = [];
+        for (const runspace of response) {
+            items.push({
+                label: runspace.name,
+                description: `ID: ${runspace.id} - ${runspace.availability}`,
+                id: runspace.id,
+            });
+        }
+
+        const options: QuickPickOptions = {
+            placeHolder: "Select PowerShell runspace to debug",
+            matchOnDescription: true,
+            matchOnDetail: true,
+        };
+
+        const item = await window.showQuickPick(items, options);
+
+        return item?.id ?? undefined;
+    }
+}
+
+class PowerShellDebugAdapterTrackerFactory implements DebugAdapterTrackerFactory, Disposable {
+    disposables: Disposable[] = [];
+    constructor(private adapterName = "PowerShell") {}
+
+
+    _log: LogOutputChannel | undefined;
+    /** Lazily creates a {@link LogOutputChannel} for debug tracing, and presents it only when DAP logging is enabled.
+    *
+    * We want to use a shared output log for separate debug sessions as usually only one is running at a time and we
+    * dont need an output window for every debug session. We also want to leave it active so user can copy and paste
+    * even on run end. When user changes the setting and disables it getter will return undefined, which will result
+    * in a noop for the logging activities, effectively pausing logging but not disposing the output channel. If the
+    * user re-enables, then logging resumes.
+    */
+    get log(): LogOutputChannel | undefined {
+        if (workspace.getConfiguration("powershell.developer").get<boolean>("traceDap") && this._log === undefined) {
+            this._log = window.createOutputChannel(`${this.adapterName}: Trace DAP`, { log: true });
+            this.disposables.push(this._log);
+        }
+        return this._log;
+    }
+
+    // This tracker effectively implements the logging for the debug adapter to a LogOutputChannel
+    createDebugAdapterTracker(session: DebugSession): DebugAdapterTracker {
+        const sessionInfo = `${this.adapterName} Debug Session: ${session.name} [${session.id}]`;
+        return {
+            onWillStartSession: () => this.log?.info(`Starting ${sessionInfo}. Set log level to trace to see DAP messages beyond errors`),
+            onWillStopSession: () => this.log?.info(`Stopping ${sessionInfo}`),
+            onExit: code => this.log?.info(`${sessionInfo} exited with code ${code}`),
+            onWillReceiveMessage: (m): void => {
+                this.log?.debug(`➡️${m.seq} ${m.type}: ${m.command}`);
+                if (m.arguments && (Array.isArray(m.arguments) ? m.arguments.length > 0 : Object.keys(m.arguments).length > 0)) {
+                    this.log?.trace(`${m.seq}: ` + JSON.stringify(m.arguments, undefined, 2));
+                }
+            },
+            onDidSendMessage: (m):void => {
+                const responseSummary = m.request_seq !== undefined
+                    ? `${m.success ? "✅" : "❌"}${m.request_seq} ${m.type}(${m.seq}): ${m.command}`
+                    : `⬅️${m.seq} ${m.type}: ${m.event ?? m.command}`;
+                this.log?.debug(
+                    responseSummary
+                );
+                if (m.body && (Array.isArray(m.body) ? m.body.length > 0 : Object.keys(m.body).length > 0)) {
+                    this.log?.trace(`${m.seq}: ` + JSON.stringify(m.body, undefined, 2));
+                }
+            },
+            onError: e => this.log?.error(e),
+        };
+    }
+
+    dispose(): void {
+        this.disposables.forEach(d => d.dispose());
+    }
 }
 
 export class SpecifyScriptArgsFeature implements Disposable {
-
     private command: Disposable;
     private context: ExtensionContext;
 
@@ -504,12 +694,13 @@ export class SpecifyScriptArgsFeature implements Disposable {
         if (text !== undefined) {
             await this.context.workspaceState.update(powerShellDbgScriptArgsKey, text);
         }
+
         return text;
     }
 }
 
 interface IProcessItem extends QuickPickItem {
-    pid: string;    // payload for the QuickPick UI
+    processId: number; // payload for the QuickPick UI
 }
 
 // eslint-disable-next-line @typescript-eslint/no-empty-interface
@@ -518,7 +709,7 @@ interface IGetPSHostProcessesArguments {
 
 interface IPSHostProcessInfo {
     processName: string;
-    processId: string;
+    processId: number;
     appDomainName: string;
     mainWindowTitle: string;
 }
@@ -526,117 +717,9 @@ interface IPSHostProcessInfo {
 export const GetPSHostProcessesRequestType =
     new RequestType<IGetPSHostProcessesArguments, IPSHostProcessInfo[], string>("powerShell/getPSHostProcesses");
 
-export class PickPSHostProcessFeature extends LanguageClientConsumer {
-
-    private command: Disposable;
-    private waitingForClientToken?: CancellationTokenSource;
-    private getLanguageClientResolve?: (value: LanguageClient) => void;
-
-    constructor(private logger: ILogger) {
-        super();
-
-        this.command =
-            commands.registerCommand("PowerShell.PickPSHostProcess", () => {
-                return this.getLanguageClient()
-                    .then((_) => this.pickPSHostProcess(), (_) => undefined);
-            });
-    }
-
-    public override setLanguageClient(languageClient: LanguageClient): void {
-        this.languageClient = languageClient;
-
-        if (this.waitingForClientToken && this.getLanguageClientResolve) {
-            this.getLanguageClientResolve(this.languageClient);
-            this.clearWaitingToken();
-        }
-    }
-
-    public dispose(): void {
-        this.command.dispose();
-    }
-
-    private getLanguageClient(): Promise<LanguageClient> {
-        if (this.languageClient !== undefined) {
-            return Promise.resolve(this.languageClient);
-        } else {
-            // If PowerShell isn't finished loading yet, show a loading message
-            // until the LanguageClient is passed on to us
-            this.waitingForClientToken = new CancellationTokenSource();
-
-            return new Promise<LanguageClient>(
-                (resolve, reject) => {
-                    this.getLanguageClientResolve = resolve;
-
-                    window
-                        .showQuickPick(
-                            ["Cancel"],
-                            { placeHolder: "Attach to PowerShell host process: Please wait, starting PowerShell..." },
-                            this.waitingForClientToken?.token)
-                        .then((response) => {
-                            if (response === "Cancel") {
-                                this.clearWaitingToken();
-                                reject();
-                            }
-                        }, undefined);
-
-                    // Cancel the loading prompt after 60 seconds
-                    setTimeout(() => {
-                        if (this.waitingForClientToken) {
-                            this.clearWaitingToken();
-                            reject();
-
-                            void this.logger.writeAndShowError("Attach to PowerShell host process: PowerShell session took too long to start.");
-                        }
-                    }, 60000);
-                },
-            );
-        }
-    }
-
-    private async pickPSHostProcess(): Promise<string | undefined> {
-        // Start with the current PowerShell process in the list.
-        const items: IProcessItem[] = [{
-            label: "Current",
-            description: "The current PowerShell Extension process.",
-            pid: "current",
-        }];
-
-        const response = await this.languageClient?.sendRequest(GetPSHostProcessesRequestType, {});
-        for (const process of response ?? []) {
-            let windowTitle = "";
-            if (process.mainWindowTitle) {
-                windowTitle = `, Title: ${process.mainWindowTitle}`;
-            }
-
-            items.push({
-                label: process.processName,
-                description: `PID: ${process.processId.toString()}${windowTitle}`,
-                pid: process.processId,
-            });
-        }
-
-        if (items.length === 0) {
-            return Promise.reject("There are no PowerShell host processes to attach to.");
-        }
-
-        const options: QuickPickOptions = {
-            placeHolder: "Select a PowerShell host process to attach to",
-            matchOnDescription: true,
-            matchOnDetail: true,
-        };
-        const item = await window.showQuickPick(items, options);
-
-        return item ? `${item.pid}` : undefined;
-    }
-
-    private clearWaitingToken(): void {
-        this.waitingForClientToken?.dispose();
-        this.waitingForClientToken = undefined;
-    }
-}
 
 interface IRunspaceItem extends QuickPickItem {
-    id: string;    // payload for the QuickPick UI
+    id: number; // payload for the QuickPick UI
 }
 
 // eslint-disable-next-line @typescript-eslint/no-empty-interface
@@ -651,102 +734,3 @@ interface IRunspace {
 
 export const GetRunspaceRequestType =
     new RequestType<IGetRunspaceRequestArguments, IRunspace[], string>("powerShell/getRunspace");
-
-export class PickRunspaceFeature extends LanguageClientConsumer {
-
-    private command: Disposable;
-    private waitingForClientToken?: CancellationTokenSource;
-    private getLanguageClientResolve?: (value: LanguageClient) => void;
-
-    constructor(private logger: ILogger) {
-        super();
-        this.command =
-            commands.registerCommand("PowerShell.PickRunspace", (processId) => {
-                return this.getLanguageClient()
-                    .then((_) => this.pickRunspace(processId), (_) => undefined);
-            }, this);
-    }
-
-    public override setLanguageClient(languageClient: LanguageClient): void {
-        this.languageClient = languageClient;
-
-        if (this.waitingForClientToken && this.getLanguageClientResolve) {
-            this.getLanguageClientResolve(this.languageClient);
-            this.clearWaitingToken();
-        }
-    }
-
-    public dispose(): void {
-        this.command.dispose();
-    }
-
-    private getLanguageClient(): Promise<LanguageClient> {
-        if (this.languageClient) {
-            return Promise.resolve(this.languageClient);
-        } else {
-            // If PowerShell isn't finished loading yet, show a loading message
-            // until the LanguageClient is passed on to us
-            this.waitingForClientToken = new CancellationTokenSource();
-
-            return new Promise<LanguageClient>(
-                (resolve, reject) => {
-                    this.getLanguageClientResolve = resolve;
-
-                    window
-                        .showQuickPick(
-                            ["Cancel"],
-                            { placeHolder: "Attach to PowerShell host process: Please wait, starting PowerShell..." },
-                            this.waitingForClientToken?.token)
-                        .then((response) => {
-                            if (response === "Cancel") {
-                                this.clearWaitingToken();
-                                reject();
-                            }
-                        }, undefined);
-
-                    // Cancel the loading prompt after 60 seconds
-                    setTimeout(() => {
-                        if (this.waitingForClientToken) {
-                            this.clearWaitingToken();
-                            reject();
-
-                            void this.logger.writeAndShowError("Attach to PowerShell host process: PowerShell session took too long to start.");
-                        }
-                    }, 60000);
-                },
-            );
-        }
-    }
-
-    private async pickRunspace(processId: string): Promise<string | undefined> {
-        const response = await this.languageClient?.sendRequest(GetRunspaceRequestType, { processId });
-        const items: IRunspaceItem[] = [];
-        for (const runspace of response ?? []) {
-            // Skip default runspace
-            if ((runspace.id === 1 || runspace.name === "PSAttachRunspace")
-                && processId === "current") {
-                continue;
-            }
-
-            items.push({
-                label: runspace.name,
-                description: `ID: ${runspace.id} - ${runspace.availability}`,
-                id: runspace.id.toString(),
-            });
-        }
-
-        const options: QuickPickOptions = {
-            placeHolder: "Select PowerShell runspace to debug",
-            matchOnDescription: true,
-            matchOnDetail: true,
-        };
-        const item = await window.showQuickPick(items, options);
-
-        return item ? `${item.id}` : undefined;
-    }
-
-    private clearWaitingToken(): void {
-        this.waitingForClientToken?.dispose();
-        this.waitingForClientToken = undefined;
-    }
-}

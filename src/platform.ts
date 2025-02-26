@@ -4,9 +4,11 @@
 import * as os from "os";
 import * as path from "path";
 import * as process from "process";
+import vscode = require("vscode");
 import { integer } from "vscode-languageserver-protocol";
 import { ILogger } from "./logging";
-import { PowerShellAdditionalExePathSettings } from "./settings";
+import { changeSetting, getSettings, PowerShellAdditionalExePathSettings } from "./settings";
+import untildify from "untildify";
 
 // This uses require so we can rewire it in unit tests!
 // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/no-var-requires
@@ -146,11 +148,19 @@ export class PowerShellExeFinder {
 
         // Also show any additionally configured PowerShells
         // These may be duplicates of the default installations, but given a different name.
-        for (const additionalPwsh of this.enumerateAdditionalPowerShellInstallations()) {
+        for await (const additionalPwsh of this.enumerateAdditionalPowerShellInstallations()) {
             if (await additionalPwsh.exists()) {
                 yield additionalPwsh;
-            } else {
-                void this.logger.writeAndShowWarning(`Additional PowerShell '${additionalPwsh.displayName}' not found at '${additionalPwsh.exePath}'!`);
+            } else if (!additionalPwsh.suppressWarning) {
+                const message = `Additional PowerShell '${additionalPwsh.displayName}' not found at '${additionalPwsh.exePath}'!`;
+                this.logger.writeWarning(message);
+
+                if (!getSettings().suppressAdditionalExeNotFoundWarning) {
+                    const selection = await vscode.window.showWarningMessage(message, "Don't Show Again");
+                    if (selection !== undefined) {
+                        await changeSetting("suppressAdditionalExeNotFoundWarning", true, true, this.logger);
+                    }
+                }
             }
         }
     }
@@ -220,13 +230,63 @@ export class PowerShellExeFinder {
      * Iterates through the configured additional PowerShell executable locations,
      * without checking for their existence.
      */
-    private *enumerateAdditionalPowerShellInstallations(): Iterable<IPossiblePowerShellExe> {
+    private async *enumerateAdditionalPowerShellInstallations(): AsyncIterable<IPossiblePowerShellExe> {
         for (const versionName in this.additionalPowerShellExes) {
             if (Object.prototype.hasOwnProperty.call(this.additionalPowerShellExes, versionName)) {
-                const exePath = this.additionalPowerShellExes[versionName];
-                if (exePath) {
-                    yield new PossiblePowerShellExe(exePath, versionName);
+                let exePath: string | undefined = utils.stripQuotePair(this.additionalPowerShellExes[versionName]);
+                if (!exePath) {
+                    continue;
                 }
+
+                exePath = untildify(exePath);
+                const args: [string, undefined, boolean, boolean]
+                    // Must be a tuple type and is suppressing the warning
+                    = [versionName, undefined, true, true];
+
+                // Always search for what the user gave us first, but with the warning
+                // suppressed so we can display it after all possibilities are exhausted
+                let pwsh = new PossiblePowerShellExe(exePath, ...args);
+                if (await pwsh.exists()) {
+                    yield pwsh;
+                    continue;
+                }
+
+                // Also search for `pwsh[.exe]` and `powershell[.exe]` if missing
+                if (this.platformDetails.operatingSystem === OperatingSystem.Windows) {
+                    // Handle Windows where '.exe' and 'powershell' are things
+                    if (!exePath.endsWith("pwsh.exe") && !exePath.endsWith("powershell.exe")) {
+                        if (exePath.endsWith("pwsh") || exePath.endsWith("powershell")) {
+                            // Add extension if that was missing
+                            pwsh = new PossiblePowerShellExe(exePath + ".exe", ...args);
+                            if (await pwsh.exists()) {
+                                yield pwsh;
+                                continue;
+                            }
+                        }
+                        // Also add full exe names (this isn't an else just in case
+                        // the folder was named "pwsh" or "powershell")
+                        pwsh = new PossiblePowerShellExe(path.join(exePath, "pwsh.exe"), ...args);
+                        if (await pwsh.exists()) {
+                            yield pwsh;
+                            continue;
+                        }
+                        pwsh = new PossiblePowerShellExe(path.join(exePath, "powershell.exe"), ...args);
+                        if (await pwsh.exists()) {
+                            yield pwsh;
+                            continue;
+                        }
+                    }
+                } else if (!exePath.endsWith("pwsh")) {
+                    // Always just 'pwsh' on non-Windows
+                    pwsh = new PossiblePowerShellExe(path.join(exePath, "pwsh"), ...args);
+                    if (await pwsh.exists()) {
+                        yield pwsh;
+                        continue;
+                    }
+                }
+
+                // If we're still being iterated over, no permutation of the given path existed so yield an object with the warning unsuppressed
+                yield new PossiblePowerShellExe(exePath, versionName, false, undefined, false);
             }
         }
     }
@@ -529,6 +589,7 @@ export function getWindowsSystemPowerShellPath(systemFolderName: string): string
 
 interface IPossiblePowerShellExe extends IPowerShellExeDetails {
     exists(): Promise<boolean>;
+    readonly suppressWarning: boolean;
 }
 
 class PossiblePowerShellExe implements IPossiblePowerShellExe {
@@ -536,7 +597,8 @@ class PossiblePowerShellExe implements IPossiblePowerShellExe {
         public readonly exePath: string,
         public readonly displayName: string,
         private knownToExist?: boolean,
-        public readonly supportsProperArguments: boolean = true) { }
+        public readonly supportsProperArguments = true,
+        public readonly suppressWarning = false) { }
 
     public async exists(): Promise<boolean> {
         if (this.knownToExist === undefined) {

@@ -3,7 +3,6 @@
 
 import * as vscode from "vscode";
 import { v4 as uuidv4 } from "uuid";
-import { LanguageClientConsumer } from "../languageClientConsumer";
 import { ILogger } from "../logging";
 import { SessionManager } from "../session";
 
@@ -20,6 +19,7 @@ export interface IPowerShellExtensionClient {
     getPowerShellVersionDetails(uuid: string): Promise<IExternalPowerShellDetails>;
     waitUntilStarted(uuid: string): Promise<void>;
     getStorageUri(): vscode.Uri;
+    getLogUri(): vscode.Uri;
 }
 
 /*
@@ -33,14 +33,13 @@ NOTE: At some point, we should release a helper npm package that wraps the API a
 * Manages session id for you
 
 */
-export class ExternalApiFeature extends LanguageClientConsumer implements IPowerShellExtensionClient {
+export class ExternalApiFeature implements IPowerShellExtensionClient {
     private static readonly registeredExternalExtension: Map<string, IExternalExtension> = new Map<string, IExternalExtension>();
 
     constructor(
         private extensionContext: vscode.ExtensionContext,
         private sessionManager: SessionManager,
         private logger: ILogger) {
-        super();
     }
 
     /*
@@ -57,7 +56,7 @@ export class ExternalApiFeature extends LanguageClientConsumer implements IPower
         string session uuid
     */
     public registerExternalExtension(id: string, apiVersion = "v1"): string {
-        this.logger.writeVerbose(`Registering extension '${id}' for use with API version '${apiVersion}'.`);
+        this.logger.writeDebug(`Registering extension '${id}' for use with API version '${apiVersion}'.`);
 
         // eslint-disable-next-line @typescript-eslint/no-unused-vars
         for (const [_name, externalExtension] of ExternalApiFeature.registeredExternalExtension) {
@@ -98,7 +97,7 @@ export class ExternalApiFeature extends LanguageClientConsumer implements IPower
         true if it worked, otherwise throws an error.
     */
     public unregisterExternalExtension(uuid = ""): boolean {
-        this.logger.writeVerbose(`Unregistering extension with session UUID: ${uuid}`);
+        this.logger.writeDebug(`Unregistering extension with session UUID: ${uuid}`);
         if (!ExternalApiFeature.registeredExternalExtension.delete(uuid)) {
             throw new Error(`No extension registered with session UUID: ${uuid}`);
         }
@@ -135,7 +134,7 @@ export class ExternalApiFeature extends LanguageClientConsumer implements IPower
     */
     public async getPowerShellVersionDetails(uuid = ""): Promise<IExternalPowerShellDetails> {
         const extension = this.getRegisteredExtension(uuid);
-        this.logger.writeVerbose(`Extension '${extension.id}' called 'getPowerShellVersionDetails'.`);
+        this.logger.writeDebug(`Extension '${extension.id}' called 'getPowerShellVersionDetails'.`);
 
         await this.sessionManager.waitUntilStarted();
         const versionDetails = this.sessionManager.getPowerShellVersionDetails();
@@ -163,7 +162,7 @@ export class ExternalApiFeature extends LanguageClientConsumer implements IPower
     */
     public async waitUntilStarted(uuid = ""): Promise<void> {
         const extension = this.getRegisteredExtension(uuid);
-        this.logger.writeVerbose(`Extension '${extension.id}' called 'waitUntilStarted'.`);
+        this.logger.writeDebug(`Extension '${extension.id}' called 'waitUntilStarted'.`);
         await this.sessionManager.waitUntilStarted();
     }
 
@@ -171,6 +170,10 @@ export class ExternalApiFeature extends LanguageClientConsumer implements IPower
         // We have to override the scheme because it defaults to
         // 'vscode-userdata' which breaks UNC paths.
         return this.extensionContext.globalStorageUri.with({ scheme: "file"});
+    }
+
+    public getLogUri(): vscode.Uri {
+        return this.extensionContext.logUri.with({ scheme: "file"});
     }
 
     public dispose(): void {
